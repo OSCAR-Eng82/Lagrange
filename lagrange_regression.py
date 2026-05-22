@@ -1,183 +1,210 @@
 """
 Lagrange Polynomial Regression
-Reads x/y data from a CSV, fits a polynomial of the requested degree using
-Lagrange interpolation (via numpy.polyfit on the sampled points), and writes
-the resulting coefficients to column E of an Excel workbook, one per cell
-starting at E1 (highest degree first).
+
+Reads x/y data from a CSV, asks the user for the data range and polynomial
+degree, fits the polynomial via least-squares, and writes the coefficients
+to column E of an Excel workbook (E1 = highest-degree term, one per cell).
+The original x/y data is preserved in columns A and B of the same workbook.
 """
 
 import os
 import csv
 import numpy as np
 import openpyxl
-from openpyxl import load_workbook
+from openpyxl import Workbook
 
 
-def read_csv(filepath, x_col=0, y_col=1, row_start=None, row_end=None):
-    """Return x and y arrays from a CSV file (1-based row range, inclusive)."""
-    with open(filepath, newline="") as f:
-        reader = list(csv.reader(f))
+# ---------------------------------------------------------------------------
+# I/O helpers
+# ---------------------------------------------------------------------------
 
-    # Auto-detect header: skip first row if it is non-numeric
-    data_rows = reader
-    header_offset = 0
-    if reader and not _is_numeric(reader[0][x_col]):
-        data_rows = reader[1:]
-        header_offset = 1
-
-    total = len(data_rows)
-
-    # Convert 1-based user range to 0-based indices within data_rows
-    r_start = (row_start - 1 - header_offset) if row_start else 0
-    r_end   = (row_end   - 1 - header_offset) if row_end   else total - 1
-
-    r_start = max(0, r_start)
-    r_end   = min(total - 1, r_end)
-
-    if r_start > r_end:
-        raise ValueError(
-            f"Empty data range: rows {row_start}–{row_end} "
-            f"(data has {total} data rows after header)"
-        )
-
-    x, y = [], []
-    for row in data_rows[r_start : r_end + 1]:
+def ask_int(prompt, min_val=None, max_val=None, allow_blank=False):
+    while True:
+        raw = input(prompt).strip()
+        if allow_blank and raw == "":
+            return None
         try:
-            x.append(float(row[x_col]))
-            y.append(float(row[y_col]))
-        except (ValueError, IndexError):
-            pass  # skip blank / non-numeric rows silently
+            val = int(raw)
+            if min_val is not None and val < min_val:
+                print(f"  Must be >= {min_val}.")
+                continue
+            if max_val is not None and val > max_val:
+                print(f"  Must be <= {max_val}.")
+                continue
+            return val
+        except ValueError:
+            print("  Please enter a whole number.")
 
-    if len(x) < 2:
-        raise ValueError("Need at least 2 numeric data points in the chosen range.")
 
-    return np.array(x), np.array(y)
+def ask_file(prompt):
+    while True:
+        path = input(prompt).strip().strip('"').strip("'")
+        if os.path.isfile(path):
+            return path
+        print(f"  File not found: {path!r}")
 
 
-def _is_numeric(value):
+# ---------------------------------------------------------------------------
+# CSV reading
+# ---------------------------------------------------------------------------
+
+def load_csv(path):
+    """Return (headers, rows) where rows is a list of raw string lists."""
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        raise ValueError("CSV file is empty.")
+
+    # Detect and separate header row
+    if rows and not _numeric(rows[0][0]):
+        return rows[0], rows[1:]
+    return None, rows
+
+
+def _numeric(s):
     try:
-        float(value)
+        float(s)
         return True
     except (ValueError, TypeError):
         return False
 
 
-def lagrange_coefficients(x, y, degree):
-    """
-    Fit a polynomial of `degree` to (x, y) via least-squares (numpy.polyfit).
-    Returns coefficients from highest to lowest power, matching the standard
-    Lagrange polynomial representation.
-    """
+def parse_data(rows, row_start, row_end, x_col, y_col):
+    """Extract float x/y arrays from the selected row slice (1-based)."""
+    subset = rows[row_start - 1 : row_end]          # slice is 0-based internally
+    x, y = [], []
+    for r in subset:
+        try:
+            x.append(float(r[x_col]))
+            y.append(float(r[y_col]))
+        except (ValueError, IndexError):
+            pass
+    if len(x) < 2:
+        raise ValueError("Fewer than 2 numeric points in the selected range.")
+    return np.array(x), np.array(y)
+
+
+# ---------------------------------------------------------------------------
+# Regression
+# ---------------------------------------------------------------------------
+
+def fit_polynomial(x, y, degree):
+    """Least-squares polynomial fit; returns coefficients highest-power first."""
     if degree >= len(x):
         raise ValueError(
-            f"Polynomial degree ({degree}) must be less than the number of "
-            f"data points ({len(x)})."
+            f"Degree ({degree}) must be less than the number of points ({len(x)})."
         )
-    coeffs = np.polyfit(x, y, degree)
-    return coeffs  # shape: (degree+1,), highest power first
+    return np.polyfit(x, y, degree)
 
 
-def write_coefficients_to_excel(coeffs, xlsx_path):
-    """Write coefficients to column E starting at E1, one per cell."""
-    if os.path.exists(xlsx_path):
-        wb = load_workbook(xlsx_path)
-        ws = wb.active
-    else:
-        wb = openpyxl.Workbook()
-        ws = wb.active
+# ---------------------------------------------------------------------------
+# Excel output
+# ---------------------------------------------------------------------------
 
-    for i, coeff in enumerate(coeffs, start=1):
-        ws[f"E{i}"] = float(coeff)
+def write_excel(path, headers, all_rows, x_col, y_col, coefficients, degree):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Lagrange Fit"
 
-    wb.save(xlsx_path)
-    print(f"\nCoefficients written to '{xlsx_path}' in column E (E1:E{len(coeffs)}).")
+    # ---- Column headers (A / B / E) ----
+    x_hdr = headers[x_col] if headers else "x"
+    y_hdr = headers[y_col] if headers else "y"
+    ws["A1"] = x_hdr
+    ws["B1"] = y_hdr
+    ws["E1"] = f"Coeff (deg {degree}, high→low)"
 
-
-def prompt_int(prompt, min_val=None, max_val=None):
-    while True:
-        raw = input(prompt).strip()
-        if not raw:
-            return None
+    # ---- Original data in A / B ----
+    for i, row in enumerate(all_rows, start=2):
         try:
-            val = int(raw)
-            if min_val is not None and val < min_val:
-                print(f"  Value must be >= {min_val}.")
-                continue
-            if max_val is not None and val > max_val:
-                print(f"  Value must be <= {max_val}.")
-                continue
-            return val
-        except ValueError:
-            print("  Please enter an integer.")
+            ws.cell(row=i, column=1, value=float(row[x_col]))
+            ws.cell(row=i, column=2, value=float(row[y_col]))
+        except (ValueError, IndexError):
+            pass
 
+    # ---- Coefficients in E (E2 onward, one per cell) ----
+    for i, c in enumerate(coefficients, start=2):
+        ws.cell(row=i, column=5, value=float(c))
+
+    wb.save(path)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    print("=== Lagrange Polynomial Regression ===\n")
+    print("=" * 50)
+    print("   Lagrange Polynomial Regression")
+    print("=" * 50)
 
-    # --- CSV path ---
-    while True:
-        csv_path = input("Enter path to CSV file: ").strip().strip('"').strip("'")
-        if os.path.isfile(csv_path):
-            break
-        print(f"  File not found: '{csv_path}'. Try again.")
+    # 1. CSV file
+    csv_path = ask_file("\nCSV file path: ")
+    headers, data_rows = load_csv(csv_path)
+    n_rows = len(data_rows)
 
-    # --- Column selection ---
-    print("\nWhich columns contain x and y data? (0-based index, default: x=0, y=1)")
-    x_col_in = input("  X column index [0]: ").strip()
-    y_col_in = input("  Y column index [1]: ").strip()
-    x_col = int(x_col_in) if x_col_in else 0
-    y_col = int(y_col_in) if y_col_in else 1
+    if headers:
+        print(f"  Header detected: {headers}")
+    print(f"  Data rows available: {n_rows}")
 
-    # --- Row range ---
-    print("\nRow range of data to use (1-based, press Enter to use all rows):")
-    row_start = prompt_int("  Start row [1]: ", min_val=1)
-    row_end   = prompt_int("  End row   [last]: ", min_val=1)
+    # 2. Column indices
+    print("\nColumn indices (0-based). Press Enter for defaults x=0, y=1.")
+    x_raw = input("  X column index [0]: ").strip()
+    y_raw = input("  Y column index [1]: ").strip()
+    x_col = int(x_raw) if x_raw else 0
+    y_col = int(y_raw) if y_raw else 1
 
-    # --- Load data ---
+    # 3. Row range
+    print(f"\nRow range to use for fitting (1 – {n_rows}, press Enter for all):")
+    row_start = ask_int(f"  Start row [1]:      ", 1, n_rows, allow_blank=True) or 1
+    row_end   = ask_int(f"  End row   [{n_rows}]: ", row_start, n_rows, allow_blank=True) or n_rows
+
+    # 4. Load selected data
     try:
-        x, y = read_csv(csv_path, x_col=x_col, y_col=y_col,
-                         row_start=row_start, row_end=row_end)
-    except Exception as e:
-        print(f"\nError reading CSV: {e}")
+        x, y = parse_data(data_rows, row_start, row_end, x_col, y_col)
+    except ValueError as e:
+        print(f"\nError: {e}")
         return
 
-    print(f"\nLoaded {len(x)} data points.")
-    print(f"  x range: [{x.min():.6g}, {x.max():.6g}]")
-    print(f"  y range: [{y.min():.6g}, {y.max():.6g}]")
+    n_pts = len(x)
+    print(f"\n  Points loaded : {n_pts}")
+    print(f"  x range       : [{x.min():.6g}, {x.max():.6g}]")
+    print(f"  y range       : [{y.min():.6g}, {y.max():.6g}]")
 
-    # --- Polynomial degree ---
-    max_degree = len(x) - 1
-    degree = prompt_int(
-        f"\nPolynomial degree (1–{max_degree}): ", min_val=1, max_val=max_degree
+    # 5. Polynomial degree
+    max_deg = n_pts - 1
+    degree = ask_int(
+        f"\nPolynomial degree (1 – {max_deg}): ", min_val=1, max_val=max_deg
     )
-    if degree is None:
-        print("No degree entered. Exiting.")
-        return
 
-    # --- Compute coefficients ---
+    # 6. Fit
     try:
-        coeffs = lagrange_coefficients(x, y, degree)
-    except Exception as e:
-        print(f"\nError computing coefficients: {e}")
+        coeffs = fit_polynomial(x, y, degree)
+    except ValueError as e:
+        print(f"\nError: {e}")
         return
 
-    print(f"\nPolynomial coefficients (highest degree first):")
+    # 7. Display coefficients
+    print(f"\nCoefficients for degree-{degree} polynomial (highest power first):")
+    print(f"  {'Power':<8}  Coefficient")
+    print(f"  {'-'*8}  {'-'*20}")
     for i, c in enumerate(coeffs):
         power = degree - i
-        print(f"  x^{power}: {c:.10g}")
+        print(f"  x^{power:<6}  {c:.10g}")
 
-    # --- Output Excel file ---
+    # 8. Output Excel
     base = os.path.splitext(csv_path)[0]
-    default_xlsx = base + "_lagrange.xlsx"
-    xlsx_input = input(f"\nOutput Excel file [{default_xlsx}]: ").strip()
-    xlsx_path = xlsx_input if xlsx_input else default_xlsx
+    default_out = base + "_lagrange.xlsx"
+    out_raw = input(f"\nOutput Excel path [{default_out}]: ").strip()
+    out_path = out_raw if out_raw else default_out
 
     try:
-        write_coefficients_to_excel(coeffs, xlsx_path)
+        write_excel(out_path, headers, data_rows, x_col, y_col, coeffs, degree)
     except Exception as e:
         print(f"\nError writing Excel file: {e}")
         return
 
+    print(f"\nCoefficients written to '{out_path}'")
+    print(f"  Column E, rows 2 – {len(coeffs) + 1}  (one coefficient per cell)")
     print("\nDone.")
 
 
